@@ -9,6 +9,8 @@ import { FragmentHighlighter } from "./FragmentHighlighter";
 import { FragmentIfcLoader } from "./FragmentLoader";
 import { Disposable } from "./baseType";
 import { RayCast } from './RayCast';
+import { ScreenCuller } from './Culler';
+import { FragmentsGroup } from 'bim-fragment';
 
 export class FragmentModel implements Disposable {
   /**
@@ -33,36 +35,29 @@ export class FragmentModel implements Disposable {
   } )
   fragmentIfcLoader: FragmentIfcLoader = new FragmentIfcLoader()
   fragmentHighlighter!: FragmentHighlighter
-  private rayCast!: RayCast
-  private initFragment() {
-    this.fragmentHighlighter = new FragmentHighlighter( this.fragmentIfcLoader.fragmentManager, this.controls )
-    this.fragmentHighlighter.add( "highlight", [this.highlight] )
-    this.fragmentHighlighter.add( "select", [this.select] )
-    this.rayCast = new RayCast( ( this.domElement as HTMLElement ), this.camera, this.clippingPlanes )
-  }
-  constructor( private controls: CameraControls ) {
-    this.initFragment()
-    FragmentModel.setupBVH()
-
-  }
   get domElement() {
+    //@ts-ignore
     return this.controls._domElement
   }
   get camera() {
     return this.controls.camera
   }
-  private static setupBVH() {
-    ( THREE.BufferGeometry.prototype as any ).computeBoundsTree = computeBoundsTree;
-    ( THREE.BufferGeometry.prototype as any ).disposeBoundsTree = disposeBoundsTree;
-    THREE.Mesh.prototype.raycast = acceleratedRaycast;
+  set setupEvent( enabled: boolean ) {
+    if ( !this.domElement ) return
+    if ( enabled ) {
+      this.domElement.addEventListener( 'mousemove', this.onMouseMove )
+      this.domElement.addEventListener( 'click', this.onSingleClick )
+      this.controls.addEventListener( 'controlstart', this.onUpdateCulling )
+      this.controls.addEventListener( 'controlend', this.onUpdateCulling )
+    } else {
+      this.domElement.removeEventListener( 'mousemove', this.onMouseMove )
+      this.domElement.removeEventListener( 'click', this.onSingleClick )
+      this.controls.removeEventListener( 'controlstart', this.onUpdateCulling )
+      this.controls.removeEventListener( 'controlend', this.onUpdateCulling )
+    }
   }
-  dispose: () => Promise<void> = () => {
-    return new Promise( () => {
-      this.fragmentIfcLoader?.dispose()
-      this.fragmentHighlighter?.dispose()
-      this.setupEvent = false
-    } )
-  }
+
+  private rayCast!: RayCast
   _found: any | null = null
   set found( event: any ) {
     this._found = this.rayCast.getRayCastModel( event, this.filterModels )
@@ -73,28 +68,61 @@ export class FragmentModel implements Disposable {
   get filterModels(): THREE.Mesh[] | THREE.InstancedMesh[] {
     return [...this.fragmentIfcLoader.fragmentManager.meshes]
   }
-  private onMouseMove = async ( event: any ) => {
-    this.found = event
-    const result = await this.fragmentHighlighter.highlight( "highlight", this.found )
+  private culling!: ScreenCuller
+
+  constructor( private controls: CameraControls ) {
+    this.initFragment()
+    this.culling = new ScreenCuller( this.camera )
+    FragmentModel.setupBVH()
 
   }
+  dispose: () => Promise<void> = () => {
+    return new Promise( () => {
+      this.fragmentIfcLoader?.dispose()
+      this.fragmentHighlighter?.dispose()
+      this.culling?.dispose()
+      this.setupEvent = false
+    } )
+  }
+
+  private initFragment() {
+    this.fragmentHighlighter = new FragmentHighlighter( this.fragmentIfcLoader.fragmentManager, this.controls )
+    this.fragmentHighlighter.add( "highlight", [this.highlight] )
+    this.fragmentHighlighter.add( "select", [this.select] )
+    this.rayCast = new RayCast( ( this.domElement as HTMLElement ), this.camera, this.clippingPlanes )
+  }
+  private static setupBVH() {
+    ( THREE.BufferGeometry.prototype as any ).computeBoundsTree = computeBoundsTree;
+    ( THREE.BufferGeometry.prototype as any ).disposeBoundsTree = disposeBoundsTree;
+    THREE.Mesh.prototype.raycast = acceleratedRaycast;
+  }
+
+  private onMouseMove = async ( event: any ) => {
+    this.found = event
+    await this.fragmentHighlighter.highlight( "highlight", this.found )
+
+  }
+  private onUpdateCulling = async () => {
+    if ( !this.culling ) return
+    this.culling.needsUpdate = true
+  }
   private onSingleClick = async () => {
-    const result = await this.fragmentHighlighter.highlight( "select", this.found )
+    await this.fragmentHighlighter.highlight( "select", this.found )
   }
-  set setupEvent( enabled: boolean ) {
-    if ( !this.domElement ) return
-    if ( enabled ) {
-      this.domElement.addEventListener( 'mousemove', this.onMouseMove )
-      this.domElement.addEventListener( 'click', this.onSingleClick )
-    } else {
-      this.domElement.removeEventListener( 'mousemove', this.onMouseMove )
-      this.domElement.removeEventListener( 'click', this.onSingleClick )
-    }
-  }
+
   async loadIfcModel( file: File ) {
     const model = await this.fragmentIfcLoader.loadIfcModel( file )
     await this.fragmentHighlighter.update()
     this.setupEvent = true
+    this.updateCulling( model )
     return model
+  }
+  private updateCulling( model: FragmentsGroup ) {
+    if ( !this.culling ) return
+    for ( const mesh of model.children ) {
+      //@ts-ignore
+      this.culling.add( mesh )
+    }
+    this.culling.needsUpdate = true
   }
 }

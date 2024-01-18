@@ -43,7 +43,9 @@ export class Disposer {
    * to remove.
    */
   private static disposeGeometry( geometry: THREE.BufferGeometry ) {
+    //@ts-ignore
     if ( geometry.boundsTree ) {
+      //@ts-ignore
       geometry.disposeBoundsTree();
     }
     geometry.dispose();
