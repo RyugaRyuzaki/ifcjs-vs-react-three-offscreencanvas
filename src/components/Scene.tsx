@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useFrame } from "@react-three/fiber";
-import { Center, ContactShadows, Environment, CameraControls } from "@react-three/drei";
+import {
+	Center,
+	ContactShadows,
+	Environment,
+	AccumulativeShadows,
+	RandomizedLight,
+	CameraControls,
+} from "@react-three/drei";
+import { Bloom, DepthOfField, EffectComposer, Noise, Vignette } from "@react-three/postprocessing";
 import { FragmentModel } from "./Fragment";
 import { Perf } from "r3f-perf";
 import { Box3, Sphere, Vector3 } from "three";
@@ -41,8 +49,11 @@ function Model() {
 	return (
 		<>
 			<Center ref={mesh}></Center>
-			<ContactShadows color={color} position={[0, -1.5, 0]} blur={3} opacity={0.75} />
+			{/* <ContactShadows color={color} position={[0, -1.5, 0]} blur={3} opacity={0.75} /> */}
 			<CameraControls smoothTime={0.25} ref={controlRef} />
+			<AccumulativeShadows temporal frames={100} alphaTest={0.95} opacity={1} scale={20}>
+				<RandomizedLight amount={8} radius={10} ambient={0.5} position={[0, 10, -2.5]} bias={0.001} size={3} />
+			</AccumulativeShadows>
 		</>
 	);
 }
@@ -54,7 +65,13 @@ export default function App() {
 			<ambientLight />
 			<pointLight position={[10, 10, 5]} />
 			<Model />
-			<Environment preset="city" />
+			<Environment preset="apartment" />
+			{/* <EffectComposer>
+				<DepthOfField focusDistance={0} focalLength={0.02} bokehScale={2} height={480} />
+				<Bloom luminanceThreshold={0} luminanceSmoothing={1} height={300} radius={0.2} />
+				<Noise opacity={0.01} />
+				<Vignette eskil={false} offset={0.1} darkness={1.1} />
+			</EffectComposer> */}
 		</>
 	);
 }

@@ -114,15 +114,8 @@ export class FragmentModel implements Disposable {
     const model = await this.fragmentIfcLoader.loadIfcModel( file )
     await this.fragmentHighlighter.update()
     this.setupEvent = true
-    this.updateCulling( model )
+    this.culling?.addModel( model )
     return model
   }
-  private updateCulling( model: FragmentsGroup ) {
-    if ( !this.culling ) return
-    for ( const mesh of model.children ) {
-      //@ts-ignore
-      this.culling.add( mesh )
-    }
-    this.culling.needsUpdate = true
-  }
+
 }

@@ -1,14 +1,37 @@
 import * as THREE from "three";
-import { Material } from "three";
-import { readPixelsAsync } from "./screen-culler-helper";
-import { Disposer } from "../Disposer";
+import { FragmentsGroup } from "bim-fragment";
 // TODO: Work at the instance level instead of the mesh level?
 /**
  * A tool to handle big scenes efficiently by automatically hiding the objects
  * that are not visible to the camera.
  */
+interface IMaterial {
+  r: number,
+  g: number,
+  b: number,
+  transparent?: boolean,
+  opacity?: number,
+}
+interface IGeometry {
+  position: Float32Array,
+  groups?: any[],
+  indices?: Uint16Array,
+}
+interface IInstanceMatrix {
+  array: Float32Array,
+  normalized: boolean,
+  itemSize: number,
+  meshPerAttribute: number,
+}
+interface IInstanceMesh {
+  material: IMaterial[] | IMaterial,
+  geometry: IGeometry,
+  count: number,
+  instanceMatrix?: IInstanceMatrix,
+  meshMatrix: number[],
+}
+
 export class ScreenCuller {
-  static readonly renderer = new THREE.WebGLRenderer();
   /** Fires after hiding the objects that were not visible to the camera. */
 
   /** {@link Component.enabled} */
@@ -24,16 +47,11 @@ export class ScreenCuller {
    * Render the internal scene used to determine the object visibility. Used
    * for debugging purposes.
    */
-  renderDebugFrame = false;
 
-  private readonly renderTarget: THREE.WebGLRenderTarget;
-  private readonly bufferSize: number;
-  private readonly materialCache: Map<string, THREE.MeshBasicMaterial>;
-  private readonly worker: Worker;
+
 
   private _meshColorMap = new Map<string, THREE.Mesh | THREE.InstancedMesh>();
   private _visibleMeshes: THREE.Mesh[] = [];
-  private _colorMeshes = new Map<string, THREE.Mesh | THREE.InstancedMesh>();
   private _meshes = new Map<string, THREE.Mesh>();
 
   private _currentVisibleMeshes = new Set<string>();
@@ -45,42 +63,18 @@ export class ScreenCuller {
   } );
 
   private _colors = { r: 0, g: 0, b: 0, i: 0 };
-
+  private worker!: Worker
+  private static rtWidth = 512
+  private static rtHeight = 512
   // Alternative scene and meshes to make the visibility check
-  private readonly _scene = new THREE.Scene();
-  private readonly _buffer: Uint8Array;
   constructor(
     private camera: THREE.Camera,
     readonly updateInterval = 1000,
-    readonly rtWidth = 512,
-    readonly rtHeight = 512,
-    readonly autoUpdate = true
   ) {
 
-    this.renderTarget = new THREE.WebGLRenderTarget( rtWidth, rtHeight );
-    this.bufferSize = rtWidth * rtHeight * 4;
-    this._buffer = new Uint8Array( this.bufferSize );
-    this.materialCache = new Map<string, THREE.MeshBasicMaterial>();
 
-    const code = `
-      addEventListener("message", (event) => {
-        const { buffer } = event.data;
-        const colors = new Set();
-        for (let i = 0; i < buffer.length; i += 4) {
-            const r = buffer[i];
-            const g = buffer[i + 1];
-            const b = buffer[i + 2];
-            const code = "" + r + "-" + g + "-" + b;
-            colors.add(code);
-        }
-        postMessage({ colors });
-      });
-    `;
+    this.initWorkers( updateInterval )
 
-    const blob = new Blob( [code], { type: "application/javascript" } );
-    this.worker = new Worker( URL.createObjectURL( blob ) );
-    this.worker.addEventListener( "message", this.handleWorkerMessage );
-    if ( autoUpdate ) window.setInterval( this.updateVisibility, updateInterval );
   }
 
   /**
@@ -88,7 +82,7 @@ export class ScreenCuller {
    * @returns the map of internal meshes used to determine visibility.
    */
   get() {
-    return this._colorMeshes;
+    return [];
   }
 
   /** {@link Disposable.dispose} */
@@ -96,51 +90,60 @@ export class ScreenCuller {
     this.enabled = false;
     this._currentVisibleMeshes.clear();
     this._recentlyHiddenMeshes.clear();
-    this._scene.children.length = 0;
-    this.worker.terminate();
-    ScreenCuller.renderer.dispose();
-    this.renderTarget.dispose();
-    ( this._buffer as any ) = null;
     this._transparentMat.dispose();
     this._meshColorMap.clear();
     this._visibleMeshes = [];
-    for ( const id in this.materialCache ) {
-      const material = this.materialCache.get( id );
-      if ( material ) {
-        material.dispose();
-      }
-    }
-    for ( const id in this._colorMeshes ) {
-      const mesh = this._colorMeshes.get( id );
-      if ( mesh ) {
-        Disposer.destroy( mesh );
-      }
-    }
-    this._colorMeshes.clear();
+
+    this.worker.terminate();
+
+
     this._meshes.clear();
   }
-
+  initWorkers( updateInterval = 1000 ) {
+    this.worker = new Worker( './CullingWorker.js' );
+    const canvas = document.createElement( 'canvas' )
+    const offScreenCanvas = canvas.transferControlToOffscreen();
+    offScreenCanvas.width = ScreenCuller.rtWidth
+    offScreenCanvas.height = ScreenCuller.rtHeight
+    this.worker.postMessage( { command: "init", dataSend: offScreenCanvas, pixel: window.devicePixelRatio }, [offScreenCanvas] )
+    this.worker.addEventListener( "message", this.handleWorkerMessage );
+    window.setInterval( this.updateVisibility, updateInterval );
+  }
+  addModel( model: FragmentsGroup ) {
+    const instances: IInstanceMesh[] = []
+    for ( const mesh of model.children ) {
+      const instance = this.add( mesh as THREE.InstancedMesh )
+      if ( !instance ) continue
+      instances.push( instance )
+    }
+    this.worker.postMessage( { command: "addModel", dataSend: instances } )
+    this.needsUpdate = true
+  }
   /**
    * Adds a new mesh to be processed and managed by the culler.
    * @mesh the mesh or instanced mesh to add.
    */
-  add( mesh: THREE.Mesh | THREE.InstancedMesh, isInstanced = true ) {
-    if ( !this.enabled ) return;
+  add( mesh: THREE.Mesh | THREE.InstancedMesh, isInstanced = true ): IInstanceMesh | null {
+    if ( !this.enabled ) return null;
 
     const { geometry, material } = mesh;
 
     const { r, g, b, code } = this.getNextColor();
-    const colorMaterial = this.getMaterial( r, g, b );
 
-    let newMaterial: Material[] | Material;
+    const colorMaterial = { r, g, b } as IMaterial;
+
+    let newMaterial: IMaterial[] | IMaterial;
 
     if ( Array.isArray( material ) ) {
       let transparentOnly = true;
-      const matArray: any[] = [];
+      const matArray: IMaterial[] = [];
 
       for ( const mat of material ) {
         if ( this.isTransparent( mat ) ) {
-          matArray.push( this._transparentMat );
+          const newColor = { ...colorMaterial }
+          newColor.transparent = mat.transparent
+          newColor.opacity = mat.opacity
+          matArray.push( newColor );
         } else {
           transparentOnly = false;
           matArray.push( colorMaterial );
@@ -149,39 +152,36 @@ export class ScreenCuller {
 
       // If we find that all the materials are transparent then we must remove this from analysis
       if ( transparentOnly ) {
-        colorMaterial.dispose();
-        return;
+        return null;
       }
 
       newMaterial = matArray;
     } else if ( this.isTransparent( material ) ) {
       // This material is transparent, so we must remove it from analysis
-      colorMaterial.dispose();
-      return;
+      return null;
     } else {
       newMaterial = colorMaterial;
     }
 
     this._meshColorMap.set( code, mesh );
     //@ts-ignore
-    const count = isInstanced ? mesh.count : 1;
-    const colorMesh = new THREE.InstancedMesh( geometry, newMaterial, count );
-
+    const count = isInstanced ? mesh.count : 1 as number;
+    const position = geometry.attributes.position.array as Float32Array
+    const groups = geometry.groups
+    const indices = geometry.index?.array as Uint16Array
+    const iGeometry = { position, groups, indices } as IGeometry
+    const meshMatrix = mesh.matrix.elements
+    const instanceMesh = { geometry: iGeometry, material: newMaterial, count, meshMatrix } as IInstanceMesh
     if ( isInstanced ) {
       //@ts-ignore
-      colorMesh.instanceMatrix = mesh.instanceMatrix;
-    } else {
-      colorMesh.setMatrixAt( 0, new THREE.Matrix4() );
+      const { array, normalized, itemSize, meshPerAttribute } = mesh.instanceMatrix
+      instanceMesh.instanceMatrix = { array, normalized, itemSize, meshPerAttribute } as IInstanceMatrix
     }
 
+
     mesh.visible = false;
-
-    colorMesh.applyMatrix4( mesh.matrix );
-    colorMesh.updateMatrix();
-
-    this._scene.add( colorMesh );
-    this._colorMeshes.set( mesh.uuid, colorMesh );
     this._meshes.set( mesh.uuid, mesh );
+    return instanceMesh
   }
 
   /**
@@ -190,40 +190,20 @@ export class ScreenCuller {
    * @param force if true, it will refresh the scene even if needsUpdate is
    * not true.
    */
-  updateVisibility = async ( force?: boolean ) => {
+  updateVisibility = async () => {
     if ( !this.enabled ) return;
-    if ( !this.needsUpdate && !force ) return;
+    if ( !this.needsUpdate ) return;
     const camera = this.camera;
     camera.updateMatrix();
-
-    ScreenCuller.renderer.setSize( this.rtWidth, this.rtHeight );
-    ScreenCuller.renderer.setRenderTarget( this.renderTarget );
-    ScreenCuller.renderer.render( this._scene, camera );
-
-    const context = ScreenCuller.renderer.getContext() as WebGL2RenderingContext;
-    await readPixelsAsync(
-      context,
-      0,
-      0,
-      this.rtWidth,
-      this.rtHeight,
-      context.RGBA,
-      context.UNSIGNED_BYTE,
-      this._buffer
-    );
-
-    ScreenCuller.renderer.setRenderTarget( null );
-
-    this.worker.postMessage( {
-      buffer: this._buffer,
-    } );
-
+    const cameraData = {
+      quaternion: camera.quaternion.toArray(), // Chuyển đổi quaternion thành mảng
+      position: camera.position.toArray() // Chuyển đổi position thành mảng
+    };
+    this.worker.postMessage( { command: "update", dataSend: cameraData } )
     this.needsUpdate = false;
   };
-  delta = 0;
   private handleWorkerMessage = async ( event: MessageEvent ) => {
     const colors = event.data.colors as Set<string>;
-    const before = performance.now()
     this._recentlyHiddenMeshes = new Set( this._currentVisibleMeshes );
     this._currentVisibleMeshes.clear();
 
@@ -240,31 +220,15 @@ export class ScreenCuller {
       }
     }
 
-    // Hide meshes that were visible before but not anymore
+    // // Hide meshes that were visible before but not anymore
     for ( const uuid of this._recentlyHiddenMeshes ) {
       const mesh = this._meshes.get( uuid );
       if ( mesh === undefined ) continue;
       mesh.visible = false;
     }
-    this.delta = performance.now() - before
   };
 
-  private getMaterial( r: number, g: number, b: number ) {
-    const colorEnabled = THREE.ColorManagement.enabled;
-    THREE.ColorManagement.enabled = false;
-    const code = `rgb(${r}, ${g}, ${b})`;
-    const color = new THREE.Color( code );
-    let material = this.materialCache.get( code );
-    if ( !material ) {
-      material = new THREE.MeshBasicMaterial( {
-        color,
-        side: THREE.DoubleSide,
-      } );
-      this.materialCache.set( code, material );
-    }
-    THREE.ColorManagement.enabled = colorEnabled;
-    return material;
-  }
+
 
   private isTransparent( material: THREE.Material ) {
     return material.transparent && material.opacity < 1;
