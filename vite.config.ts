@@ -1,20 +1,19 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable no-undef */
-import { defineConfig, loadEnv } from "vite";
+import {defineConfig, loadEnv} from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 // https://vitejs.dev/config/
-export default defineConfig( () => {
+//@ts-ignore
+export default defineConfig(() => {
   // Load env file based on `mode` in the current working directory.
   // Set the third parameter to '' to load all env regardless of the `VITE_` prefix.
-  // eslint-disable-next-line no-undef
-  const env = loadEnv( "development", process.cwd(), "" );
+  const env = loadEnv("development", process.cwd(), "");
   return {
     // vite config
 
-    plugins: [react()],
+    plugins: [react({fastRefresh: false})],
+
     worker: {
-      plugins: [react()],
+      plugins: [react({fastRefresh: false})],
     },
     server: {
       port: env.PORT, // set port
@@ -25,18 +24,22 @@ export default defineConfig( () => {
     },
     resolve: {
       alias: {
-        '~': path.resolve( __dirname, './src' ),
-        '@assets': path.resolve( __dirname, './src/assets' ),
-        '@BimModel': path.resolve( __dirname, './src/BimModel' ),
-        '@components': path.resolve( __dirname, './src/components' ),
+        "~": path.resolve(__dirname, "./src"),
+        "@assets": path.resolve(__dirname, "./src/assets"),
+        "@BimModel": path.resolve(__dirname, "./src/BimModel"),
+        "@components": path.resolve(__dirname, "./src/components"),
       },
     },
+    base: "./",
     build: {
-      outDir: "build",
+      outDir: "dist",
     },
     test: {
       global: true,
-      environment: 'jsdom',
+      includeSource: ["src/**/*.{js,ts}"],
+      environment: "jsdom",
+      setupFiles: "./src/test/setup.ts",
+      CSS: true,
     },
   };
-} );
+});
